@@ -22,7 +22,7 @@ import os
 import mujoco
 import numpy as np
 
-from muscle_supermimic.assets.robots import mshuman700, myofullbody
+from muscle_supermimic.assets.robots import mshuman700, myofullbody, mfg_v11
 from muscle_supermimic.assets.robots.model_info import ModelInfo, root_offset
 from muscle_supermimic.assets.robots.mshuman700.mshuman700_cfg import get_spec as mshuman700_spec
 from muscle_supermimic.assets.robots.myofullbody.myofullbody_cfg import get_spec as myofullbody_spec
@@ -40,6 +40,8 @@ VARIANTS = {
     "MS-Human-700 locked hands": (lambda: mshuman700_spec(lock_hands=True), lambda: mshuman700.compiled_model(lock_hands=True)),
     "MyoFullBody": (lambda: myofullbody_spec(), lambda: myofullbody.compiled_model()),
 }
+if mfg_v11.XML_PATH.is_file():
+    VARIANTS["MFG-V11"] = (mfg_v11.get_spec, mfg_v11.compiled_model)
 FOOT_BODIES = ("calcn_r", "toes_r", "calcn_l", "toes_l")
 
 
@@ -50,7 +52,7 @@ def foot_geoms(m: mujoco.MjModel, entity: mujoco.MjModel) -> list[int]:
     return [m.geom(f"robot/{n}").id for n in names]
 
 
-def build_scene(spec_fn, ghost: bool = False) -> mujoco.MjModel:
+def build_scene(spec_fn, ghost: bool = False, ground_height: float = 0.0) -> mujoco.MjModel:
     scene = mujoco.MjSpec()
     v = scene.visual
     v.global_.offwidth, v.global_.offheight = 1920, 1080
@@ -62,7 +64,7 @@ def build_scene(spec_fn, ghost: bool = False) -> mujoco.MjModel:
                       rgb1=SKY_TOP, rgb2=SKY_HORIZON, width=512, height=3072)  # fmt: skip
     # some emission keeps the lit floor white; the shadow still shows
     scene.add_material(name="floor", rgba=FLOOR_RGBA, emission=0.22, reflectance=0.0, specular=0.0, shininess=0.0)
-    scene.worldbody.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05], material="floor")
+    scene.worldbody.add_geom(type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05], pos=[0, 0, ground_height], material="floor")
     # the light follows the body's center of mass: a directional light's shadow map covers only the model's extent
     # around the light, so a fixed light loses the shadow once the body walks a few meters away
     scene.worldbody.add_light(pos=[0, 0, 6], dir=[0.08, 0.12, -1.0], type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
@@ -83,9 +85,9 @@ def build_scene(spec_fn, ghost: bool = False) -> mujoco.MjModel:
 
 def muscle_tendons(m: mujoco.MjModel, entity: mujoco.MjModel) -> np.ndarray:
     """The tendons the robot's muscles pull on, in its actuator order (the robot is attached first)."""
-    n = entity.nu
-    assert (m.actuator_trntype[:n] == mujoco.mjtTrn.mjTRN_TENDON).all()
-    return m.actuator_trnid[:n, 0]
+    ids = ModelInfo(entity).muscle_ids
+    assert (m.actuator_trntype[ids] == mujoco.mjtTrn.mjTRN_TENDON).all()
+    return m.actuator_trnid[ids, 0]
 
 
 def activation_rgb(act: np.ndarray) -> np.ndarray:
@@ -129,18 +131,21 @@ def render(m: mujoco.MjModel, entity: mujoco.MjModel, qpos: np.ndarray, width: i
     return frames, np.array(foot_z)
 
 
-def replay_motion(path: str, out_dir: str, lock_hands: bool, seconds: float | None, width: int, height: int):
+def replay_motion(path: str, out_dir: str, lock_hands: bool, seconds: float | None, width: int, height: int, variant: str | None = None):
     import mediapy
 
     from muscle_supermimic.tasks.tracking.mdp.kinematics import SkeletonKinematics
     from muscle_supermimic.tasks.tracking.mdp.motion import MotionLib
 
-    entity = mshuman700.compiled_model(lock_hands=lock_hands)
+    if variant is None:
+        variant = "MS-Human-700 locked hands" if lock_hands else "MS-Human-700"
+    spec_fn, model_fn = VARIANTS[variant]
+    entity = model_fn()
     kin = SkeletonKinematics(("pelvis",), "cpu", entity)
     mot = MotionLib.from_path(path, kin, 0.02, "cpu")
     q_full, _ = kin.full_joint_state(mot.q, mot.qd)
     qpos = torch_cat(mot.root_p, mat_to_quat(mot.root_R @ kin.R_off.T), q_full)
-    m = build_scene(lambda: mshuman700_spec(lock_hands=lock_hands))
+    m = build_scene(spec_fn, ground_height=-0.01 if variant == "MFG-V11" else 0.0)
     for c, name in enumerate(mot.names):
         s, n = int(mot.clip_start[c]), int(mot.clip_len[c])
         n = min(n, int(seconds * FPS)) if seconds else n
@@ -165,6 +170,7 @@ def main():
     ap.add_argument("input", help="a trajectory from ms-eval --record, or a motion clip")
     ap.add_argument("out_dir")
     ap.add_argument("--lock-hands", action="store_true", help="motion replay on the locked-hands model")
+    ap.add_argument("--model", choices=list(VARIANTS), default=None, help="model for canonical motion replay, or override rollout model inference")
     ap.add_argument("--clips", nargs="*", default=None, help="clip names (default: all)")
     ap.add_argument("--seconds", type=float, default=None, help="render at most this long per clip")
     ap.add_argument("--width", type=int, default=1920)
@@ -177,14 +183,14 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     d = np.load(args.input)
     if "ref_qpos" not in d.files:
-        return replay_motion(args.input, args.out_dir, args.lock_hands, args.seconds, args.width, args.height)
+        return replay_motion(args.input, args.out_dir, args.lock_hands, args.seconds, args.width, args.height, args.model)
     qpos, f, alive, ref = d["qpos"], d["f"], d["alive"], d["ref_qpos"]
     fps = float(d["fps"]) if "fps" in d.files else 50.0  # control rate of the rollout
     every = max(1, round(fps / FPS))  # rendered every this many control steps
     nq = qpos.shape[-1]
-    variant = next(k for k, (_, model) in VARIANTS.items() if model().nq == nq)
+    variant = args.model or next(k for k, (_, model) in VARIANTS.items() if model().nq == nq)
     spec_fn, entity = VARIANTS[variant][0], VARIANTS[variant][1]()
-    m = build_scene(spec_fn, ghost=args.ghost)
+    m = build_scene(spec_fn, ghost=args.ghost, ground_height=-0.01 if variant == "MFG-V11" else 0.0)
     assert m.nq == (2 if args.ghost else 1) * nq
     print(f"{variant} rollout")
     for c, name in enumerate(d["names"]):

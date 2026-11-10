@@ -5,7 +5,8 @@ description = "SuperMimic (world-model BPTT motion tracking) for whole-body musc
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 readme = "README.md"
-requires-python = ">=3.12"
+# Local rsl environment uses Python 3.10; compatibility is checked by pytest.
+requires-python = ">=3.10"
 dependencies = [
     "mjlab==1.6.0",
     "musclemimic-models==1.0.6",

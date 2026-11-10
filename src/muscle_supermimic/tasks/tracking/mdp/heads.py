@@ -171,7 +171,11 @@ class TrackingHeads:
         return self.muscles(ctx)[2]
 
     def muscle_excitation(self, ctx: StepCtx) -> torch.Tensor:
-        return ctx.a
+        return ctx.a[..., :self.geo.num_muscles]
+
+    def position_command(self, ctx: StepCtx) -> torch.Tensor:
+        """Previous normalized servo targets, for hybrid muscle/position tasks."""
+        return ctx.a[..., self.geo.num_muscles:]
 
     def muscle_activation(self, ctx: StepCtx) -> torch.Tensor:
         return ctx.S[6]

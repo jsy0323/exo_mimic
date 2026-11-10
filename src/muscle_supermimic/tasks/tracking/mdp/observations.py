@@ -67,6 +67,11 @@ def muscle_activation(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor
     return TrackingHeads.muscle_activation(*_ctx(env, command_name))
 
 
+@analytic(TrackingHeads.position_command)
+def position_command(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
+    return TrackingHeads.position_command(*_ctx(env, command_name))
+
+
 @analytic(TrackingHeads.touch)
 def touch(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
     return TrackingHeads.touch(*_ctx(env, command_name))

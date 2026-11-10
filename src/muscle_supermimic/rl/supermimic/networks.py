@@ -72,12 +72,13 @@ def run_mlp(net: nn.Module, x: torch.Tensor) -> torch.Tensor:
 class WorldModel(nn.Module):
     """Deterministic body dynamics S_{t+1} = f(S_t, act_t, act_{t+1}) predicting frame-local state increments,
     with an auxiliary head for the foot touch of S_{t+1}. The activations before and after the step are inputs;
-    contacts are the only observation the analytic heads cannot compute."""
+    contacts are the only observation the analytic heads cannot compute.
+    Hybrid tasks additionally condition on the normalized joint-position controls."""
 
-    def __init__(self, nq: int, num_muscles: int, num_touch: int, hidden=(2048, 2048, 2048)):
+    def __init__(self, nq: int, num_muscles: int, num_touch: int, hidden=(2048, 2048, 2048), num_position_controls: int = 0):
         super().__init__()
         self.nq, self.num_touch = nq, num_touch
-        self.in_dim = 1 + 6 + 3 + 3 + 2 * nq + 2 * num_muscles
+        self.in_dim = 1 + 6 + 3 + 3 + 2 * nq + 2 * num_muscles + num_position_controls
         self.out_dim = 3 + 3 + 3 + 3 + 2 * nq
         self.net = mlp(self.in_dim, list(hidden), self.out_dim + num_touch, act=nn.SiLU, layer_norm=True)
         nn.init.zeros_(self.net[-1].weight)
@@ -86,8 +87,9 @@ class WorldModel(nn.Module):
         self.out_norm = RunningNorm(self.out_dim, eps=1e-4)
         self.touch_norm = RunningNorm(num_touch)
 
-    def inputs(self, S, act, act1):
-        return torch.cat((invariant_features(S), act, act1), -1)
+    def inputs(self, S, act, act1, position_controls=None):
+        parts = (invariant_features(S), act, act1)
+        return torch.cat(parts if position_controls is None else parts + (position_controls,), -1)
 
     @staticmethod
     def targets(S, S1):
@@ -108,10 +110,10 @@ class WorldModel(nn.Module):
             -1,
         )
 
-    def step(self, S, act, act1):
+    def step(self, S, act, act1, position_controls=None):
         """-> (body state of S_{t+1}, its normalized touch prediction)."""
         p, R, v, w, q, qd = S[:6]
-        y = run_mlp(self.net, self.in_norm(self.inputs(S, act, act1)))
+        y = run_mlp(self.net, self.in_norm(self.inputs(S, act, act1, position_controls)))
         d = y[..., : self.out_dim] * self.out_norm.std() + self.out_norm.mean
         H = yaw_mat(R)
         dp, dth, dv, dw, dq, dqd = d.split((3, 3, 3, 3, self.nq, self.nq), -1)

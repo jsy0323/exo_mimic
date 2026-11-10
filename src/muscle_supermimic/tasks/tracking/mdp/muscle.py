@@ -17,16 +17,16 @@ MJ_MINVAL = 1e-15
 
 class MuscleActivation:
     def __init__(self, m: mujoco.MjModel, substeps: int, dt: float, device: str):
-        assert (m.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE).all()
-        assert not m.actuator_actearly.any(), "actearly muscles use the next activation for force"
-        assert (m.actuator_actnum == 1).all()
-        prm = torch.tensor(m.actuator_dynprm[:, :3], dtype=torch.float32, device=device)
+        ids = m.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE
+        assert not m.actuator_actearly[ids].any(), "actearly muscles use the next activation for force"
+        assert (m.actuator_actnum[ids] == 1).all()
+        prm = torch.tensor(m.actuator_dynprm[ids, :3], dtype=torch.float32, device=device)
         self.tau_act, self.tau_deact, self.smooth = prm[:, 0], prm[:, 1], prm[:, 2]
         self.hard_switch = bool((self.smooth < MJ_MINVAL).all())
-        self.limited = bool(m.actuator_actlimited.any())
-        rng = torch.tensor(m.actuator_actrange, dtype=torch.float32, device=device)
-        self.act_lo = torch.where(torch.tensor(m.actuator_actlimited, device=device).bool(), rng[:, 0], -torch.inf)
-        self.act_hi = torch.where(torch.tensor(m.actuator_actlimited, device=device).bool(), rng[:, 1], torch.inf)
+        self.limited = bool(m.actuator_actlimited[ids].any())
+        rng = torch.tensor(m.actuator_actrange[ids], dtype=torch.float32, device=device)
+        self.act_lo = torch.where(torch.tensor(m.actuator_actlimited[ids], device=device).bool(), rng[:, 0], -torch.inf)
+        self.act_hi = torch.where(torch.tensor(m.actuator_actlimited[ids], device=device).bool(), rng[:, 1], torch.inf)
         self.substeps, self.dt = substeps, dt
 
     def act_dot(self, ctrl: torch.Tensor, act: torch.Tensor) -> torch.Tensor:

@@ -69,8 +69,14 @@ class MotionCommand(CommandTerm):
         cols = torch.tensor(self.info.indep_cols, device=dev)
         self._q_adr = idx.joint_q_adr.long()[cols]
         self._v_adr = idx.joint_v_adr.long()[cols]
-        self._act_adr = torch.tensor(env.sim.mj_model.actuator_actadr[idx.ctrl_ids.cpu().numpy()], device=dev).long()
+        muscle_ctrl_ids = idx.ctrl_ids[self.info.muscle_ids].cpu().numpy()
+        self._act_adr = torch.tensor(env.sim.mj_model.actuator_actadr[muscle_ctrl_ids], device=dev).long()
         assert len(self._act_adr) == self.info.num_muscles
+        if self.info.position_ids:
+            pos_ids = self.info.position_ids
+            lo, hi = m.actuator_ctrlrange[pos_ids].T
+            defaults = m.qpos0[m.jnt_qposadr[m.actuator_trnid[pos_ids, 0]]]
+            self.position_default = torch.tensor((defaults - lo) / (hi - lo), device=dev, dtype=torch.float32)
 
         # episode bookkeeping
         self.f = torch.zeros(self.num_envs, dtype=torch.long, device=dev)

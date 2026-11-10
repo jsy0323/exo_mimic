@@ -49,11 +49,14 @@ class ModelInfo:
         self.qpos0 = m.qpos0.copy()
         assert m.jnt_limited[self.indep_ids].all(), "every independent joint needs a range"
         self.q_lo, self.q_hi = m.jnt_range[self.indep_ids].T.copy()
-        assert (m.actuator_trntype == mujoco.mjtTrn.mjTRN_TENDON).all()
-        assert (m.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE).all()
-        self.num_muscles = m.nu
-        self.muscle_names = [m.actuator(a).name for a in range(m.nu)]
-        self.muscle_tendon_names = [m.tendon(int(t)).name for t in m.actuator_trnid[:, 0]]
+        self.muscle_ids = np.flatnonzero(m.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE).tolist()
+        assert self.muscle_ids, "model has no muscle actuators"
+        assert (m.actuator_trntype[self.muscle_ids] == mujoco.mjtTrn.mjTRN_TENDON).all()
+        self.position_ids = [a for a in range(m.nu) if a not in self.muscle_ids]
+        assert (m.actuator_trntype[self.position_ids] == mujoco.mjtTrn.mjTRN_JOINT).all()
+        self.num_muscles = len(self.muscle_ids)
+        self.muscle_names = [m.actuator(a).name for a in self.muscle_ids]
+        self.muscle_tendon_names = [m.tendon(int(m.actuator_trnid[a, 0])).name for a in self.muscle_ids]
 
     def full_joint_pos(self, q: np.ndarray, qd: np.ndarray | None = None):
         """Independent coordinates (..., 37) -> every non-root joint (..., 79) in model order (numpy)."""

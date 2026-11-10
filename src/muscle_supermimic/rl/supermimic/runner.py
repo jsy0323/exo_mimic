@@ -18,6 +18,7 @@ import math
 import os
 import time
 from dataclasses import asdict, fields
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -92,6 +93,7 @@ class SuperMimicRunner:
         self.cmd = u.command_manager.get_term(cfg.command_name)
         self.heads, self.muscle, self.motion = self.cmd.heads, self.cmd.muscle, self.cmd.motion
         self.nq, self.nm = self.heads.nq, self.cmd.info.num_muscles
+        self.na = u.action_manager.total_action_dim
         self.obs_policy = AnalyticObsGroup(u, cfg.obs_groups["policy"][0], self.heads)
         self.obs_goal = AnalyticObsGroup(u, cfg.obs_groups["goal"][0], self.heads)
         self.hist = max(h for _, _, h, _ in self.obs_policy.terms)
@@ -130,9 +132,12 @@ class SuperMimicRunner:
 
     def _build_networks(self):
         c, dev = self.cfg, self.device
-        self.wm = WorldModel(self.nq, self.nm, NUM_TOUCH, c.wm_hidden).to(dev)
-        self.pi = Policy(self.obs_policy.dim, self.obs_goal.dim, self.nm, c.enc_hidden, c.dec_hidden, c.latent_dim,
+        self.wm = WorldModel(self.nq, self.nm, NUM_TOUCH, c.wm_hidden, num_position_controls=self.na - self.nm).to(dev)
+        self.pi = Policy(self.obs_policy.dim, self.obs_goal.dim, self.na, c.enc_hidden, c.dec_hidden, c.latent_dim,
                          c.init_excitation).to(dev)  # fmt: skip
+        if self.na > self.nm:
+            with torch.no_grad():
+                self.pi.dec[-1].bias[self.nm:].copy_(torch.logit(self.cmd.position_default.clamp(1e-3, 1 - 1e-3)))
         self.critic = Critic(self.obs_policy.dim + self.obs_goal.dim + self.heads.critic_extras_dim(), c.critic_hidden).to(dev)
         self.critic_targ = self.critic
         if c.critic_target_alpha > 0:
@@ -147,8 +152,8 @@ class SuperMimicRunner:
         S, act = unflatten_body(s[:, 0], self.nq), act[:, 0]
         preds, touch = [], []
         for j in range(self.cfg.wm_window):
-            act1, _ = self.muscle.step(act, a[:, j])
-            S, touch_n = self.wm.step(S, act, act1)
+            act1, _ = self.muscle.step(act, a[:, j, :self.nm])
+            S, touch_n = self.wm.step(S, act, act1, a[:, j, self.nm:])
             act = act1
             preds.append(S), touch.append(touch_n)
         return tuple(torch.stack([P[i] for P in preds], 1) for i in range(6)) + (torch.stack(touch, 1),)  # (B, k, ...)
@@ -169,8 +174,8 @@ class SuperMimicRunner:
         obs, goal = self.obs_policy.assemble(hist, ctx), self.obs_goal.assemble(None, ctx)
         a = self.pi(obs, goal)
         x = torch.cat((obs, goal, self.heads.critic_extras(ctx)), -1).detach()
-        act1, _ = self.muscle.step(S[6], a)
-        body1, touch_n = self.wm.step(S, S[6], act1)
+        act1, _ = self.muscle.step(S[6], a[..., :self.nm])
+        body1, touch_n = self.wm.step(S, S[6], act1, a[..., self.nm:])
         S1 = body1 + (act1, self.wm.touch(touch_n))
         f1 = f + 1
         return S1, a, self.obs_policy.push(hist, StepCtx(S1, f1, a)), f1, x
@@ -333,7 +338,7 @@ class SuperMimicRunner:
             done = dones.bool()
             self.buffer.add({"s": flatten_body(S), "act": S[6], "touch": S[7], "a": a, "s1": flatten_body(S1), "touch1": S1[7],
                              "r": rew, "f": f, "ep_step": ep_step, "done": done})  # fmt: skip
-            self.wm.in_norm.update(self.wm.inputs(S, S[6], S1[6]))
+            self.wm.in_norm.update(self.wm.inputs(S, S[6], S1[6], a[..., self.nm:]))
             self.wm.out_norm.update(self.wm.targets(S, S1))
             self.wm.touch_norm.update(S1[7])
             self.sim_steps += N
@@ -355,13 +360,16 @@ class SuperMimicRunner:
 
     # ------------------------------------------------------------------ mjlab runner interface
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
+        with self._make_logger() as logger:
+            self._learn(num_learning_iterations, init_at_random_ep_len, logger)
+
+    def _learn(self, num_learning_iterations: int, init_at_random_ep_len: bool, logger):
         del init_at_random_ep_len  # episodes already start at sampled reference frames
         c, u = self.cfg, self.uenv
         assert not u.cfg.auto_reset, "SuperMimic records terminal states: the training env needs auto_reset=False"
-        self.buffer = ReplayBuffer(c.buffer_steps, u.num_envs, self.heads.body_state_dim, self.nm, NUM_TOUCH, self.device)
+        self.buffer = ReplayBuffer(c.buffer_steps, u.num_envs, self.heads.body_state_dim, self.nm, NUM_TOUCH, self.device, num_actions=self.na)
         self.ep_ret = torch.zeros(u.num_envs, device=self.device)
         self.obs = self.env.get_observations()
-        logger = self._make_logger()
         stats = {"r": [], "r_terms": [], "ep_len": [], "ep_ret": [], "term": [], "done": []}
         self.collect(max(c.warmup_steps, c.wm_window + self.hist + 1), stats)
         t_start, t_log, step_acc = time.time() - self.wall_offset, time.time(), 0.0
@@ -457,43 +465,62 @@ class SuperMimicRunner:
     def add_git_repo_to_log(self, repo_file_path: str):
         pass
 
+    @contextmanager
     def _make_logger(self):
         if not self.log_dir:
-            return lambda row: None
+            yield lambda row: None
+            return
         os.makedirs(self.log_dir, exist_ok=True)
         path = os.path.join(self.log_dir, "train_log.csv")
         new = not os.path.exists(path)
         fh = open(path, "a", newline="")
         writer, tb, wb = None, None, None
-        if self.cfg.logger == "tensorboard":
-            try:
-                from torch.utils.tensorboard import SummaryWriter
+        exit_code = 0
+        try:
+            if self.cfg.logger == "tensorboard":
+                try:
+                    from torch.utils.tensorboard import SummaryWriter
 
-                tb = SummaryWriter(self.log_dir)
-            except ImportError:
-                print("[WARN] tensorboard is not installed; logging to train_log.csv only")
-        elif self.cfg.logger == "wandb":
-            import wandb
+                    tb = SummaryWriter(self.log_dir)
+                except ImportError:
+                    print("[WARN] tensorboard is not installed; logging to train_log.csv only")
+            elif self.cfg.logger == "wandb":
+                import wandb
 
-            wb = wandb.init(project=self.cfg.wandb_project, name=self.cfg.run_name or os.path.basename(self.log_dir),
-                            dir=self.log_dir, config=asdict(self.cfg))  # fmt: skip
+                wb = wandb.init(project=self.cfg.wandb_project, name=self.cfg.run_name or os.path.basename(self.log_dir),
+                                dir=self.log_dir, config=asdict(self.cfg), tags=list(self.cfg.wandb_tags))  # fmt: skip
+                wb.define_metric("train/iteration")
+                wb.define_metric("train/*", step_metric="train/iteration")
+                if wb.settings.mode == "online" and wb.url:
+                    print(f"[wandb] Training curves: {wb.url}", flush=True)
+                    with open(os.path.join(self.log_dir, "wandb_url.txt"), "w", encoding="utf-8") as url_file:
+                        url_file.write(wb.url + "\n")
 
-        def log(row: dict):
-            nonlocal writer, new
-            if writer is None:
-                writer = csv.DictWriter(fh, fieldnames=list(row))
-                if new:
-                    writer.writeheader()
-            writer.writerow({k: (f"{v:.6g}" if isinstance(v, float) else v) for k, v in row.items()})
-            fh.flush()
+            def log(row: dict):
+                nonlocal writer
+                if writer is None:
+                    writer = csv.DictWriter(fh, fieldnames=list(row))
+                    if new:
+                        writer.writeheader()
+                writer.writerow({k: (f"{v:.6g}" if isinstance(v, float) else v) for k, v in row.items()})
+                fh.flush()
+                if tb is not None:
+                    for k, v in row.items():
+                        if k != "iteration":
+                            tb.add_scalar(f"train/{k}", v, row["iteration"])
+                if wb is not None:
+                    wb.log({f"train/{k}": v for k, v in row.items()}, step=row["iteration"])
+
+            yield log
+        except BaseException:
+            exit_code = 1
+            raise
+        finally:
+            fh.close()
             if tb is not None:
-                for k, v in row.items():
-                    if k != "iteration":
-                        tb.add_scalar(f"train/{k}", v, row["iteration"])
+                tb.close()
             if wb is not None:
-                wb.log({f"train/{k}": v for k, v in row.items()}, step=row["iteration"])
-
-        return log
+                wb.finish(exit_code=exit_code)
 
 
 def set_requires_grad(m: nn.Module, flag: bool):

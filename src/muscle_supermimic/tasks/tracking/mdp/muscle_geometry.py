@@ -154,12 +154,13 @@ class MuscleGeometry:
     """Muscle length, velocity and force of every muscle (actuator order) from (q, qd, act)."""
 
     def __init__(self, m: mujoco.MjModel, device: str, dtype: torch.dtype = torch.float32):
-        assert (m.actuator_trntype == mujoco.mjtTrn.mjTRN_TENDON).all() and (m.actuator_gear[:, 0] == 1).all()
-        assert not m.actuator_forcelimited.any() and (m.actuator_gainprm[:, 2] > 0).all() and (m.actuator_biasprm[:, 2] > 0).all()
+        ids = np.flatnonzero(m.actuator_dyntype == mujoco.mjtDyn.mjDYN_MUSCLE)
+        assert (m.actuator_trntype[ids] == mujoco.mjtTrn.mjTRN_TENDON).all() and (m.actuator_gear[ids, 0] == 1).all()
+        assert not m.actuator_forcelimited[ids].any() and (m.actuator_gainprm[ids, 2] > 0).all() and (m.actuator_biasprm[ids, 2] > 0).all()
         S, SPH, CYL = mujoco.mjtWrap.mjWRAP_SITE, mujoco.mjtWrap.mjWRAP_SPHERE, mujoco.mjtWrap.mjWRAP_CYLINDER
         pairs, triples, sites, geoms = [], [], {}, {}
-        for col in range(m.nu):
-            t = int(m.actuator_trnid[col, 0])
+        for col, actuator_id in enumerate(ids):
+            t = int(m.actuator_trnid[actuator_id, 0])
             adr, num = int(m.tendon_adr[t]), int(m.tendon_num[t])
             typ, obj = m.wrap_type[adr : adr + num], m.wrap_objid[adr : adr + num]
             assert typ[0] == S and typ[-1] == S and not ((typ != S) & (typ != SPH) & (typ != CYL)).any(), m.tendon(t).name
@@ -192,17 +193,17 @@ class MuscleGeometry:
         self.tri_has_side = side >= 0
         self.tri_side = side.clamp(min=0)
         self.tri_cyl = t([x[5] for x in triples])
-        self.num_muscles = m.nu
+        self.num_muscles = len(ids)
         # muscle curves: gainprm = (range0, range1, force, scale, lmin, lmax, vmax, fpmax, fvmax)
-        g = m.actuator_gainprm
+        g = m.actuator_gainprm[ids]
         self.range0, self.range1, self.F0 = t(g[:, 0], dtype=dtype), t(g[:, 1], dtype=dtype), t(g[:, 2], dtype=dtype)
         self.lmin, self.lmax, self.vmax = t(g[:, 4], dtype=dtype), t(g[:, 5], dtype=dtype), t(g[:, 6], dtype=dtype)
         self.fvmax = t(g[:, 8], dtype=dtype)
         # the passive force reads biasprm (same layout), which MyoFullBody's supraspinatus sets apart from gainprm
-        b = m.actuator_biasprm
+        b = m.actuator_biasprm[ids]
         self.b_range0, self.b_range1, self.b_F0 = t(b[:, 0], dtype=dtype), t(b[:, 1], dtype=dtype), t(b[:, 2], dtype=dtype)
         self.b_lmax, self.b_fpmax = t(b[:, 5], dtype=dtype), t(b[:, 7], dtype=dtype)
-        self.lr0, self.lr1 = t(m.actuator_lengthrange[:, 0], dtype=dtype), t(m.actuator_lengthrange[:, 1], dtype=dtype)
+        self.lr0, self.lr1 = t(m.actuator_lengthrange[ids, 0], dtype=dtype), t(m.actuator_lengthrange[ids, 1], dtype=dtype)
 
     def length_velocity(self, q: torch.Tensor, qd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Muscle (= tendon) lengths and velocities, (..., nm) each, from the independent joints (..., nq)."""

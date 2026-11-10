@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import mujoco
 from mjlab.envs.mdp.actions import TendonEffortActionCfg
 from mjlab.envs.mdp.actions.actions import TendonEffortAction
 
@@ -20,7 +21,8 @@ if TYPE_CHECKING:
 class MuscleExcitationAction(TendonEffortAction):
     def _find_targets(self, cfg: MuscleExcitationActionCfg) -> tuple[list[int], list[str]]:
         tendon_names = list(self._entity.tendon_names)
-        names = [act.target.split("/")[-1] for act in self._entity.spec.actuators]  # as Entity.tendon_names
+        names = [act.target.split("/")[-1] for act in self._entity.spec.actuators
+                 if act.dyntype == mujoco.mjtDyn.mjDYN_MUSCLE]  # as Entity.tendon_names
         return [tendon_names.index(n) for n in names], names
 
 

@@ -1,5 +1,9 @@
 # muscle-supermimic
 
+Local MFG-V11 / Windows `rsl` setup: edit [configs/train_mfg_v11.yaml](configs/train_mfg_v11.yaml),
+then run `python scripts/train_rsl.py --config configs/train_mfg_v11.yaml`.
+Add `--dry-run` to preview without training. See [REPRODUCE_RSL.md](REPRODUCE_RSL.md) for parameters and W&B curves.
+
 **Whole-body motion tracking for musculoskeletal humanoids with one differentiable world model:**
 [SuperMimic](https://arxiv.org/abs/2610.28480) driving MS-Human-700 (700 muscles) and MyoFullBody (354
 muscles), on [mjlab](https://github.com/mujocolab/mjlab) / MuJoCo-Warp.

@@ -1,0 +1,88 @@
+# python scripts/train_rsl.py --config configs/train_mfg_v11.yaml
+# Add --dry-run to inspect configuration without starting training or W&B.
+# Paths below are relative to E:/exo_mimic (the project root), or absolute.
+robot: MFG-V11
+model_xml: 'E:\exo_terrain\Env\MFG_Musculoskelet_V11\MFG_Raj2015_V11.xml'
+motion_file: data/mfg_v11/train.txt
+gpu_ids: [0]                     # null = CPU; [0] = first GPU
+log_root: logs/rsl_rl
+
+env:
+  scene:
+    num_envs: 512
+  commands:
+    motion:
+      compile: false             # RTX 5080 / Windows
+      sampling_mode: return      # SuperMimic adaptive reset sampling
+  sim:
+    mujoco:
+      timestep: 0.001
+      integrator: implicitfast
+      cone: elliptic
+      impratio: 5.0
+      iterations: 100
+      ls_iterations: 50
+    nconmax: 48
+    njmax: 320
+  decimation: 10                  # 0.001 s x 10 = 100 Hz control
+  episode_length_s: 300.0
+  auto_reset: false               # Required: the SuperMimic runner handles resets
+
+agent:
+  seed: 1
+  max_iterations: 16000
+  run_name: mfg_v11_seed1
+  logger: wandb
+  wandb_project: muscle_supermimic
+  wandb_tags: [MFG-V11, rsl, RTX5080]
+  log_interval: 10
+  save_interval: 1000
+
+  # Replay / simulator data collection
+  buffer_steps: 500
+  warmup_steps: 64
+  utd: 0.4
+  action_noise: 0.1
+
+  # Learned world model
+  wm_hidden: [2048, 2048, 2048]
+  wm_window: 8
+  wm_batches: 10
+  wm_batch: 2048
+  wm_only_iters: 500              # First 500 iterations: world model only
+  touch_loss_weight: 1.0
+
+  # Policy / critic / imagined rollouts
+  enc_hidden: [2048, 1024, 512, 256]
+  dec_hidden: [2048, 1024, 512, 256]
+  latent_dim: 32
+  critic_hidden: [256, 128]
+  init_excitation: 0.1
+  horizon: 32
+  pi_batch: 512
+  gamma: 0.99
+  lam: 0.95
+  critic_epochs: 5
+  critic_minibatches: 4
+  use_critic: true
+  remat_imagination: true
+  critic_target_alpha: 0.0
+  value_clip: false
+  state_grad_clip: 100.0
+
+  # Optimizer / numeric settings
+  lr: 0.0002
+  lr_decay_iters: 250000
+  grad_clip: 1.0
+  policy_grad_clip_value: 0.1
+  amp: bf16
+  compile: false
+
+  # Model checkpoint resume (local run, separate from the W&B run)
+  resume: false
+  load_run: '.*'
+  load_checkpoint: 'model_.*.pt'
+
+wandb:
+  entity: null                   # Team/account; null keeps WANDB_ENTITY/login default
+  mode: online                   # offline records locally for later `wandb sync`

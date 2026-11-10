@@ -10,14 +10,14 @@ import torch
 
 
 class ReplayBuffer:
-    def __init__(self, T: int, N: int, body_dim: int, num_muscles: int, num_touch: int, device: str):
+    def __init__(self, T: int, N: int, body_dim: int, num_muscles: int, num_touch: int, device: str, num_actions: int | None = None):
         self.T, self.N, self.device = T, N, device
         f16 = torch.float16
         self.fields = {
             "s": ((body_dim,), torch.float32),  # body state before the step
             "act": ((num_muscles,), f16),  # muscle activations before the step
             "touch": ((num_touch,), torch.float32),  # foot touch before the step
-            "a": ((num_muscles,), f16),  # excitation applied during the step
+            "a": ((num_actions if num_actions is not None else num_muscles,), f16),  # muscles, then optional position controls
             "s1": ((body_dim,), torch.float32),  # body state after the step (activations follow analytically)
             "touch1": ((num_touch,), torch.float32),  # foot touch after the step
             "r": ((), torch.float32),
